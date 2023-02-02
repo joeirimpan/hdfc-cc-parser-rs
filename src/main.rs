@@ -82,6 +82,7 @@ pub fn parse(path: String, _password: String) -> Result<Vec<Transaction>, Error>
                     _ => return true,
                 });
 
+            let mut amt_assigned = false;
             let mut col = 0;
             let mut found_row = false;
             let mut transaction = Transaction::default();
@@ -130,16 +131,20 @@ pub fn parse(path: String, _password: String) -> Result<Vec<Transaction>, Error>
                                         // Check for the descriptio, amount in the same row where the date was found.
                                         if found_row {
                                             // page end. push the transaction to the list and continue.
-                                            if col == 3 {
-                                                members.push(transaction.clone());
-                                                found_row = false;
-                                                continue;
+                                            if amt_assigned {
+                                                if col >= 3 {
+                                                    members.push(transaction.clone());
+                                                    found_row = false;
+                                                    continue;
+                                                }
                                             }
+
                                             col += 1;
 
                                             // Must be amount?
                                             if col > 1 && d.contains(".") {
                                                 if let Ok(amt) = d.replace(",", "").parse::<f32>() {
+                                                    amt_assigned = true;
                                                     transaction.amount = amt * -1.0;
                                                     continue;
                                                 }
