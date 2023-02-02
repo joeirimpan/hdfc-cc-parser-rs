@@ -10,11 +10,7 @@ use std::fs;
 use std::fs::File;
 use std::str::FromStr;
 
-#[derive(Debug)]
-pub struct TransactionList {
-    pub members: Vec<Transaction>,
-}
-
+// Transaction row representation.
 #[derive(Debug, Clone)]
 pub struct Transaction {
     pub date: NaiveDateTime,
@@ -22,6 +18,7 @@ pub struct Transaction {
     pub amount: f32,
 }
 
+// default values for new Transaction.
 impl Default for Transaction {
     fn default() -> Self {
         Transaction {
@@ -35,88 +32,145 @@ impl Default for Transaction {
     }
 }
 
-pub fn parse(path: String, _password: String) -> Result<TransactionList, Error> {
+// Parse the pdf and return a list of transactions.
+pub fn parse(path: String, _password: String) -> Result<Vec<Transaction>, Error> {
     let file = pdfFile::<Vec<u8>>::open_password(path.clone(), _password.as_bytes())
         .context(format!("failed to open file {}", path))?;
 
     let mut members = Vec::new();
 
+    // Iterate through pages
     for page in file.pages() {
         if let Ok(page) = page {
-            let mut flag = false;
-            let mut intl_flag = false;
-            let mut skip_header = 11;
-            let mut column_ct: i32 = 4;
-            let mut transaction = Transaction::default();
-            for (op, _text_state) in ops_with_text_state(&page, &file) {
-                match op {
+            // For the pdf operations, skip till domestic/internation transactions and then skip till the first occurence of date
+            // This guesses the transactions rows.
+            let state = ops_with_text_state(&page, &file)
+                .skip_while(|(op, _text_state)| match op {
                     Op::TextDraw { ref text } => {
-                        if flag && skip_header > 0 {
-                            skip_header -= 1;
-                            continue;
-                        }
-
                         let data = text.as_bytes();
                         if let Ok(s) = std::str::from_utf8(data) {
-                            if flag {
-                                let parsed_datetime =
-                                    NaiveDateTime::parse_from_str(s.trim(), "%d/%m/%Y %H:%M:%S")
-                                        .or_else(|_| {
-                                            NaiveDate::parse_from_str(s.trim(), "%d/%m/%Y").map(
-                                                |date| {
-                                                    NaiveDateTime::new(
-                                                        date,
-                                                        NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
-                                                    )
-                                                },
-                                            )
-                                        });
+                            return s.trim() != "Domestic Transactions"
+                                && s.trim() != "International Transactions";
+                        }
+                        return true;
+                    }
+                    _ => return true,
+                })
+                .skip_while(|(op, _text_state)| match op {
+                    Op::TextDraw { ref text } => {
+                        let data = text.as_bytes();
+                        if let Ok(s) = std::str::from_utf8(data) {
+                            let parsed_datetime =
+                                NaiveDateTime::parse_from_str(s.trim(), "%d/%m/%Y %H:%M:%S")
+                                    .or_else(|_| {
+                                        NaiveDate::parse_from_str(s.trim(), "%d/%m/%Y").map(
+                                            |date| {
+                                                NaiveDateTime::new(
+                                                    date,
+                                                    NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
+                                                )
+                                            },
+                                        )
+                                    });
+                            match parsed_datetime {
+                                Ok(_) => return false,
+                                Err(_) => return true,
+                            }
+                        }
+                        return true;
+                    }
+                    _ => return true,
+                });
 
-                                if let Ok(d) = parsed_datetime {
-                                    // Date field found, count for the next 4 columns
-                                    transaction.date = d;
-                                    column_ct = 4;
-                                } else {
-                                    match column_ct {
-                                        4 => transaction.tx = String::from_str(s.trim()).unwrap(),
-                                        3 => {}
-                                        2 => {
-                                            if s.trim() == "" {
-                                                continue;
-                                            }
-                                            transaction.amount =
-                                                s.trim().replace(",", "").parse::<f32>().unwrap()
-                                        }
-                                        1 => {
-                                            if intl_flag {
-                                                transaction.amount = s
-                                                    .trim()
-                                                    .replace(",", "")
-                                                    .parse::<f32>()
-                                                    .unwrap()
-                                            }
-                                            if !intl_flag && s.trim() != "Cr" {
-                                                transaction.amount *= -1.0;
-                                            }
-                                            members.push(transaction.clone());
-                                        }
-                                        0 => {}
-                                        _ => {}
-                                    }
-                                    column_ct -= 1;
-                                }
+            let mut col = 0;
+            let mut found_row = false;
+            let mut transaction = Transaction::default();
+            for (op, _text_state) in state {
+                match op {
+                    Op::TextDraw { ref text } => {
+                        let data = text.as_bytes();
+                        if let Ok(s) = std::str::from_utf8(data) {
+                            let d = s.trim();
+                            if d == "" {
+                                continue;
                             }
 
-                            match s.trim() {
-                                "Domestic Transactions" => {
-                                    intl_flag = false;
-                                    flag = true;
+                            // try parsing %d/%m/%Y %H:%M:%S / %d/%m/%Y formats
+                            match NaiveDateTime::parse_from_str(d, "%d/%m/%Y %H:%M:%S") {
+                                Ok(dt) => {
+                                    // we have transaction here, clone it
+                                    if col > 0 {
+                                        members.push(transaction.clone());
+                                    }
+
+                                    transaction.date = dt;
+                                    found_row = true;
+
+                                    // reset col
+                                    col = 0;
                                 }
-                                "International Transactions" => {
-                                    flag = true;
-                                    intl_flag = true;
-                                }
-                                _ => {}
+                                Err(_) => match NaiveDate::parse_from_str(d, "%d/%m/%Y") {
+                                    Ok(dt) => {
+                                        // we have transaction here, clone it
+                                        if col > 0 {
+                                            members.push(transaction.clone());
+                                        }
+
+                                        transaction.date = NaiveDateTime::new(
+                                            dt,
+                                            NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
+                                        );
+                                        found_row = true;
+
+                                        // reset col
+                                        col = 0;
+                                    }
+
+                                    Err(_) => {
+                                        // Check for the descriptio, amount in the same row where the date was found.
+                                        if found_row {
+                                            // page end. push the transaction to the list and continue.
+                                            if col == 3 {
+                                                members.push(transaction.clone());
+                                                found_row = false;
+                                                continue;
+                                            }
+                                            col += 1;
+
+                                            // Must be amount?
+                                            if col > 1 && d.contains(".") {
+                                                if let Ok(amt) = d.replace(",", "").parse::<f32>() {
+                                                    transaction.amount = amt * -1.0;
+                                                    continue;
+                                                }
+                                            }
+
+                                            // Must be description or debit/credit representation or reward points
+                                            if let Ok(tx) = String::from_str(s.trim()) {
+                                                // skip empty string
+                                                if tx == "" {
+                                                    continue;
+                                                }
+
+                                                // skip reward points
+                                                if tx.parse::<i32>().is_ok() {
+                                                    continue;
+                                                }
+
+                                                // mark it as credit
+                                                if col > 2 && tx == "Cr" {
+                                                    transaction.amount *= -1.0;
+                                                    continue;
+                                                }
+
+                                                // assume transaction description to be next to date
+                                                if col == 1 {
+                                                    transaction.tx = tx;
+                                                }
+                                            }
+                                        }
+                                    }
+                                },
                             }
                         }
                     }
@@ -126,7 +180,7 @@ pub fn parse(path: String, _password: String) -> Result<TransactionList, Error> 
         }
     }
 
-    Ok(TransactionList { members })
+    Ok(members)
 }
 
 fn main() -> Result<(), Error> {
@@ -156,13 +210,10 @@ fn main() -> Result<(), Error> {
     // Parse all the statement files.
     let mut members = Vec::new();
     for file in pdf_files {
-        members.extend(
-            parse(file, _password.clone())
-                .context("Failed to parse statement")?
-                .members,
-        )
+        members.extend(parse(file, _password.clone()).context("Failed to parse statement")?)
     }
 
+    // Create a csv file and write the contents of the transaction list
     let w = File::create(output).context("Unable to create output file")?;
     let mut csv_writer = Writer::from_writer(w);
 
