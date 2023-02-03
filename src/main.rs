@@ -15,6 +15,7 @@ use std::str::FromStr;
 pub struct Transaction {
     pub date: NaiveDateTime,
     pub tx: String,
+    pub points: i32,
     pub amount: f32,
 }
 
@@ -27,6 +28,7 @@ impl Default for Transaction {
                 NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
             ),
             tx: "".to_owned(),
+            points: 0,
             amount: 0.0,
         }
     }
@@ -102,6 +104,7 @@ pub fn parse(path: String, _password: String) -> Result<Vec<Transaction>, Error>
                                     // we have transaction here, clone it
                                     if col > 0 {
                                         members.push(transaction.clone());
+                                        transaction = Transaction::default();
                                     }
 
                                     transaction.date = dt;
@@ -115,6 +118,7 @@ pub fn parse(path: String, _password: String) -> Result<Vec<Transaction>, Error>
                                         // we have transaction here, clone it
                                         if col > 0 {
                                             members.push(transaction.clone());
+                                            transaction = Transaction::default();
                                         }
 
                                         transaction.date = NaiveDateTime::new(
@@ -132,9 +136,16 @@ pub fn parse(path: String, _password: String) -> Result<Vec<Transaction>, Error>
                                         if found_row {
                                             // page end. push the transaction to the list and continue.
                                             if amt_assigned {
-                                                if col >= 3 {
+                                                if col > 3 {
+                                                    if let Ok(tx) = String::from_str(s.trim()) {
+                                                        if tx == "Cr" {
+                                                            transaction.amount *= -1.0;
+                                                        }
+                                                    }
+
                                                     members.push(transaction.clone());
                                                     found_row = false;
+                                                    transaction = Transaction::default();
                                                     continue;
                                                 }
                                             }
@@ -158,7 +169,9 @@ pub fn parse(path: String, _password: String) -> Result<Vec<Transaction>, Error>
                                                 }
 
                                                 // skip reward points
-                                                if tx.parse::<i32>().is_ok() {
+                                                if let Ok(p) = tx.replace("- ", "-").parse::<i32>()
+                                                {
+                                                    transaction.points = p;
                                                     continue;
                                                 }
 
@@ -226,6 +239,7 @@ fn main() -> Result<(), Error> {
         let row = &[
             member.date.to_string(),
             member.tx.clone(),
+            member.points.to_string(),
             member.amount.to_string(),
         ];
 

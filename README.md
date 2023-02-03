@@ -4,7 +4,7 @@ This tool parse and extract information from HDFC Bank credit card statements in
 
 ## Features
 
-* Extracts transaction details such as date, description, amount
+* Extracts transaction details such as date, description, points, amount
 * Multiple pdfs can be parsed and collated into 1 CSV.
 
 ## Requirements
@@ -21,3 +21,17 @@ This tool parse and extract information from HDFC Bank credit card statements in
 ## Why?
 
 A similar python implementation which uses tabula-py took 70s+ to generate a csv with 8 pdfs. With this implementation, it took only 0.02s to generate the same.
+
+## Analytics
+
+Assuming `clickhouse-local` is installed
+
+* Get the points accumulated
+```bash
+cat output.csv | clickhouse-local --structure "tx_date Datetime, tx String, points Int32, amount Float32" --query "SELECT SUM(points) FROM table" --input-format CSV
+```
+
+* Get the debits
+```bash
+cat output.csv | clickhouse-local --structure "tx_date Datetime, tx String, points Int32, amount Float32" --query "SELECT SUM(amount) FROM table WHERE amount < 0" --input-format CSV
+```
