@@ -13,6 +13,8 @@ edition = "2021"
 anyhow = "1.0.68"
 chrono = "0.4.23"
 csv = "1.1.6"
-pdf = { git = "https://github.com/pdf-rs/pdf", features = [ "euclid" ] }
-pdf_tools = { git = "https://github.com/pdf-rs/pdf_tools"}
+pdf = { git = "https://github.com/pdf-rs/pdf", features = [ "euclid" ], rev = "5cf56b7" }
 regex = "1.7.1"
+pdf_encoding = "0.3.0"
+euclid = "0.22.6"
+log = "*"
