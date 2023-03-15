@@ -222,11 +222,7 @@ fn main() -> Result<(), Error> {
         .arg(arg!(--dir <path_to_directory>).required(true))
         .arg(arg!(--password <password>).required(false))
         .arg(arg!(--output <output>).required(true))
-        .arg(
-            arg!(--sortformat <date_format>)
-                .required(false)
-                .default_value("%d-%m-%Y"),
-        )
+        .arg(arg!(--sortformat <date_format>).required(false))
         .get_matches();
 
     let path = matches.get_one::<String>("dir");
