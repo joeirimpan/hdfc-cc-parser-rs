@@ -2,12 +2,12 @@ mod pdf_tools;
 
 use anyhow::{Context, Error};
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+use clap::{arg, Command};
 use csv::Writer;
 use pdf::content::*;
 use pdf::file::File as pdfFile;
 use pdf_tools::ops_with_text_state;
 use regex::Regex;
-use std::env::args;
 use std::fs;
 use std::fs::File;
 use std::str::FromStr;
@@ -203,15 +203,39 @@ pub fn parse(path: String, _password: String) -> Result<Vec<Transaction>, Error>
     Ok(members)
 }
 
-fn main() -> Result<(), Error> {
-    let path = args().nth(1).expect("no dir given");
-    let _password = args().nth(2).expect("no password given");
-    let output = args().nth(3).expect("no output file given");
+fn date_format_to_regex(date_format: &str) -> Regex {
+    let regex_str = date_format
+        .replace("%Y", r"\d{4}")
+        .replace("%m", r"\d{2}")
+        .replace("%d", r"\d{2}")
+        .replace("%H", r"\d{2}")
+        .replace("%M", r"\d{2}")
+        .replace("%S", r"\d{2}")
+        .replace("%z", r"[\+\-]\d{4}")
+        .replace("%Z", r"[A-Z]{3}");
 
-    let entries = fs::read_dir(path).unwrap();
+    Regex::new(&regex_str).unwrap()
+}
+
+fn main() -> Result<(), Error> {
+    let matches = Command::new("HDFC credit card statement parser")
+        .arg(arg!(--dir <path_to_directory>).required(true))
+        .arg(arg!(--password <password>).required(false))
+        .arg(arg!(--output <output>).required(true))
+        .arg(
+            arg!(--sortformat <date_format>)
+                .required(false)
+                .default_value("%d-%m-%Y"),
+        )
+        .get_matches();
+
+    let path = matches.get_one::<String>("dir");
+    let _password = matches.get_one::<String>("password");
+    let output = matches.get_one::<String>("output").unwrap().to_string();
+
+    let entries = fs::read_dir(path.unwrap()).unwrap();
 
     // Filter pdf files, sort the statement files based on dates in the file names.
-    let re = Regex::new(r"(\d{1,2}-\d{2}-\d{4})").unwrap();
     let mut pdf_files: Vec<String> = entries
         .filter_map(Result::ok)
         .map(|entry| entry.path())
@@ -221,16 +245,34 @@ fn main() -> Result<(), Error> {
         })
         .map(|path| path.to_string_lossy().to_string())
         .collect();
-    pdf_files.sort_by(|a, b| {
-        let a_date = NaiveDate::parse_from_str(&re.captures(a).unwrap()[1], "%d-%m-%Y").unwrap();
-        let b_date = NaiveDate::parse_from_str(&re.captures(b).unwrap()[1], "%d-%m-%Y").unwrap();
-        a_date.cmp(&b_date)
-    });
+
+    // Sort only if there is a date format specified
+    if let Some(sort_format) = matches.get_one::<String>("sortformat") {
+        pdf_files.sort_by(|a, b| {
+            let re = date_format_to_regex(sort_format);
+            let a_date = match re.find(a) {
+                Some(date_str) => {
+                    NaiveDate::parse_from_str(date_str.as_str(), sort_format).unwrap()
+                }
+                None => NaiveDate::from_ymd_opt(1970, 1, 1).unwrap(),
+            };
+            let b_date = match re.find(b) {
+                Some(date_str) => {
+                    NaiveDate::parse_from_str(date_str.as_str(), sort_format).unwrap()
+                }
+                None => NaiveDate::from_ymd_opt(1970, 1, 1).unwrap(),
+            };
+            a_date.cmp(&b_date)
+        })
+    }
 
     // Parse all the statement files.
     let mut members = Vec::new();
     for file in pdf_files {
-        members.extend(parse(file, _password.clone()).context("Failed to parse statement")?)
+        members.extend(
+            parse(file, _password.unwrap_or(&"".to_string()).to_string())
+                .context("Failed to parse statement")?,
+        )
     }
 
     // Create a csv file and write the contents of the transaction list
