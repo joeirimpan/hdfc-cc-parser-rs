@@ -19,3 +19,8 @@ pdf_encoding = "0.3.0"
 euclid = "0.22.6"
 log = "*"
 clap = "4.1.8"
+
+[profile.release]
+strip = true
+opt-level = "z"
+lto = true
