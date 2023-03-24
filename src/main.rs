@@ -51,6 +51,7 @@ pub fn parse(path: String, _password: String) -> Result<Vec<Transaction>, Error>
                     let mut column_ct = 0;
                     let mut header_assigned = false;
                     let mut header_column_ct = 0;
+                    let mut prev_value = "";
 
                     for op in ops.iter().skip_while(|op| match op {
                         Op::TextDraw { ref text } => {
@@ -69,19 +70,21 @@ pub fn parse(path: String, _password: String) -> Result<Vec<Transaction>, Error>
                                 if let Ok(s) = std::str::from_utf8(data) {
                                     // figure out the header column count from the table header.
                                     // This makes it easier to figure out the end of transaction lines.
+                                    let d = s.trim();
                                     if !header_assigned {
-                                        if s.trim() == "" {
+                                        // save this value to check in next iteration of Op::BeginText to count header columns.
+                                        prev_value = d;
+                                        if d == "" {
                                             continue;
                                         }
 
-                                        header_column_ct += 1;
-
+                                        // XXX: assume the transaction row starts with a date.
                                         let parsed_datetime = NaiveDateTime::parse_from_str(
-                                            s.trim(),
+                                            d,
                                             "%d/%m/%Y %H:%M:%S",
                                         )
                                         .or_else(|_| {
-                                            NaiveDate::parse_from_str(s.trim(), "%d/%m/%Y").map(
+                                            NaiveDate::parse_from_str(d, "%d/%m/%Y").map(
                                                 |date| {
                                                     NaiveDateTime::new(
                                                         date,
@@ -94,19 +97,20 @@ pub fn parse(path: String, _password: String) -> Result<Vec<Transaction>, Error>
                                         match parsed_datetime {
                                             Ok(_) => {
                                                 header_assigned = true;
-                                                // current parsed datetime, cardholder name, whether domestic/international is part of header count. remove it to get accurate count.
-                                                header_column_ct -= 3;
+                                                // remove card holder name
+                                                header_column_ct -= 1;
+                                                prev_value = "";
                                             }
                                             Err(_) => continue,
                                         }
                                     }
 
-                                    let d = s.trim();
                                     column_ct += 1;
                                     if d == "" {
                                         if !found_row {
                                             column_ct -= 1;
                                         }
+
                                         continue;
                                     }
 
@@ -163,6 +167,13 @@ pub fn parse(path: String, _password: String) -> Result<Vec<Transaction>, Error>
                                     }
                                 }
                             }
+
+                            Op::BeginText => {
+                                if !header_assigned && prev_value != "" {
+                                    header_column_ct += 1;
+                                }
+                            }
+
                             Op::EndText => {
                                 if found_row && column_ct == header_column_ct {
                                     // push transaction here
