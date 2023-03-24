@@ -1,12 +1,9 @@
-mod pdf_tools;
-
 use anyhow::{Context, Error};
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use clap::{arg, Command};
 use csv::Writer;
 use pdf::content::*;
 use pdf::file::File as pdfFile;
-use pdf_tools::ops_with_text_state;
 use regex::Regex;
 use std::fs;
 use std::fs::File;
@@ -46,155 +43,151 @@ pub fn parse(path: String, _password: String) -> Result<Vec<Transaction>, Error>
     // Iterate through pages
     for page in file.pages() {
         if let Ok(page) = page {
-            // For the pdf operations, skip till domestic/internation transactions and then skip till the first occurence of date
-            // This guesses the transactions rows.
-            let state = ops_with_text_state(&page, &file)
-                .skip_while(|(op, _text_state)| match op {
-                    Op::TextDraw { ref text } => {
-                        let data = text.as_bytes();
-                        if let Ok(s) = std::str::from_utf8(data) {
-                            return s.trim() != "Domestic Transactions"
-                                && s.trim() != "International Transactions";
+            if let Some(content) = &page.contents {
+                if let Ok(ops) = content.operations(&file) {
+                    let mut transaction = Transaction::default();
+
+                    let mut found_row = false;
+                    let mut column_ct = 0;
+                    let mut header_assigned = false;
+                    let mut header_column_ct = 0;
+                    let mut prev_value = "";
+
+                    for op in ops.iter().skip_while(|op| match op {
+                        Op::TextDraw { ref text } => {
+                            let data = text.as_bytes();
+                            if let Ok(s) = std::str::from_utf8(data) {
+                                return s.trim() != "Domestic Transactions"
+                                    && s.trim() != "International Transactions";
+                            }
+                            return true;
                         }
-                        return true;
-                    }
-                    _ => return true,
-                })
-                .skip_while(|(op, _text_state)| match op {
-                    Op::TextDraw { ref text } => {
-                        let data = text.as_bytes();
-                        if let Ok(s) = std::str::from_utf8(data) {
-                            let parsed_datetime =
-                                NaiveDateTime::parse_from_str(s.trim(), "%d/%m/%Y %H:%M:%S")
-                                    .or_else(|_| {
-                                        NaiveDate::parse_from_str(s.trim(), "%d/%m/%Y").map(
-                                            |date| {
-                                                NaiveDateTime::new(
-                                                    date,
-                                                    NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
-                                                )
-                                            },
+                        _ => return true,
+                    }) {
+                        match op {
+                            Op::TextDraw { ref text } => {
+                                let data = text.as_bytes();
+                                if let Ok(s) = std::str::from_utf8(data) {
+                                    // figure out the header column count from the table header.
+                                    // This makes it easier to figure out the end of transaction lines.
+                                    let d = s.trim();
+                                    if !header_assigned {
+                                        // save this value to check in next iteration of Op::BeginText to count header columns.
+                                        prev_value = d;
+                                        if d == "" {
+                                            continue;
+                                        }
+
+                                        // XXX: assume the transaction row starts with a date.
+                                        let parsed_datetime = NaiveDateTime::parse_from_str(
+                                            d,
+                                            "%d/%m/%Y %H:%M:%S",
                                         )
-                                    });
-                            match parsed_datetime {
-                                Ok(_) => return false,
-                                Err(_) => return true,
-                            }
-                        }
-                        return true;
-                    }
-                    _ => return true,
-                });
+                                        .or_else(|_| {
+                                            NaiveDate::parse_from_str(d, "%d/%m/%Y").map(
+                                                |date| {
+                                                    NaiveDateTime::new(
+                                                        date,
+                                                        NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
+                                                    )
+                                                },
+                                            )
+                                        });
 
-            let mut amt_assigned = false;
-            let mut col = 0;
-            let mut found_row = false;
-            let mut transaction = Transaction::default();
-            for (op, _text_state) in state {
-                match op {
-                    Op::TextDraw { ref text } => {
-                        let data = text.as_bytes();
-                        if let Ok(s) = std::str::from_utf8(data) {
-                            let d = s.trim();
-                            if d == "" {
-                                continue;
-                            }
-
-                            // try parsing %d/%m/%Y %H:%M:%S / %d/%m/%Y formats
-                            match NaiveDateTime::parse_from_str(d, "%d/%m/%Y %H:%M:%S") {
-                                Ok(dt) => {
-                                    // we have transaction here, clone it
-                                    if col > 0 {
-                                        members.push(transaction.clone());
-                                        transaction = Transaction::default();
+                                        match parsed_datetime {
+                                            Ok(_) => {
+                                                header_assigned = true;
+                                                // remove card holder name
+                                                header_column_ct -= 1;
+                                                prev_value = "";
+                                            }
+                                            Err(_) => continue,
+                                        }
                                     }
 
-                                    transaction.date = dt;
-                                    found_row = true;
+                                    column_ct += 1;
+                                    if d == "" {
+                                        if !found_row {
+                                            column_ct -= 1;
+                                        }
 
-                                    // reset col
-                                    col = 0;
+                                        continue;
+                                    }
+
+                                    if column_ct == 1 {
+                                        if let Ok(tx_date) =
+                                            NaiveDateTime::parse_from_str(d, "%d/%m/%Y %H:%M:%S")
+                                        {
+                                            found_row = true;
+                                            transaction.date = tx_date;
+                                            continue;
+                                        }
+                                        if let Ok(tx_date) =
+                                            NaiveDate::parse_from_str(d, "%d/%m/%Y")
+                                        {
+                                            found_row = true;
+                                            transaction.date = NaiveDateTime::new(
+                                                tx_date,
+                                                NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
+                                            );
+                                            continue;
+                                        }
+                                    }
+
+                                    if column_ct > 2 && d.contains(".") {
+                                        if let Ok(amt) = d.replace(",", "").parse::<f32>() {
+                                            transaction.amount = amt * -1.0;
+                                            continue;
+                                        }
+                                    }
+
+                                    // Must be description or debit/credit representation or reward points
+                                    if let Ok(tx) = String::from_str(d) {
+                                        // skip empty string
+                                        if tx == "" {
+                                            continue;
+                                        }
+
+                                        // skip reward points
+                                        if let Ok(p) = tx.replace("- ", "-").parse::<i32>() {
+                                            transaction.points = p;
+                                            continue;
+                                        }
+
+                                        // mark it as credit
+                                        if column_ct > 3 && tx == "Cr" {
+                                            transaction.amount *= -1.0;
+                                            continue;
+                                        }
+
+                                        // assume transaction description to be next to date
+                                        if column_ct == 2 {
+                                            transaction.tx = tx;
+                                        }
+                                    }
                                 }
-                                Err(_) => match NaiveDate::parse_from_str(d, "%d/%m/%Y") {
-                                    Ok(dt) => {
-                                        // we have transaction here, clone it
-                                        if col > 0 {
-                                            members.push(transaction.clone());
-                                            transaction = Transaction::default();
-                                        }
-
-                                        transaction.date = NaiveDateTime::new(
-                                            dt,
-                                            NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
-                                        );
-                                        found_row = true;
-
-                                        // reset col
-                                        col = 0;
-                                    }
-
-                                    Err(_) => {
-                                        // Check for the descriptio, amount in the same row where the date was found.
-                                        if found_row {
-                                            // page end. push the transaction to the list and continue.
-                                            if amt_assigned {
-                                                if col > 3 {
-                                                    if let Ok(tx) = String::from_str(s.trim()) {
-                                                        if tx == "Cr" {
-                                                            transaction.amount *= -1.0;
-                                                        }
-                                                    }
-
-                                                    members.push(transaction.clone());
-                                                    found_row = false;
-                                                    transaction = Transaction::default();
-                                                    continue;
-                                                }
-                                            }
-
-                                            col += 1;
-
-                                            // Must be amount?
-                                            if col > 1 && d.contains(".") {
-                                                if let Ok(amt) = d.replace(",", "").parse::<f32>() {
-                                                    amt_assigned = true;
-                                                    transaction.amount = amt * -1.0;
-                                                    continue;
-                                                }
-                                            }
-
-                                            // Must be description or debit/credit representation or reward points
-                                            if let Ok(tx) = String::from_str(s.trim()) {
-                                                // skip empty string
-                                                if tx == "" {
-                                                    continue;
-                                                }
-
-                                                // skip reward points
-                                                if let Ok(p) = tx.replace("- ", "-").parse::<i32>()
-                                                {
-                                                    transaction.points = p;
-                                                    continue;
-                                                }
-
-                                                // mark it as credit
-                                                if col > 2 && tx == "Cr" {
-                                                    transaction.amount *= -1.0;
-                                                    continue;
-                                                }
-
-                                                // assume transaction description to be next to date
-                                                if col == 1 {
-                                                    transaction.tx = tx;
-                                                }
-                                            }
-                                        }
-                                    }
-                                },
                             }
+
+                            Op::BeginText => {
+                                if !header_assigned && prev_value != "" {
+                                    header_column_ct += 1;
+                                }
+                            }
+
+                            Op::EndText => {
+                                if found_row && column_ct == header_column_ct {
+                                    // push transaction here
+                                    members.push(transaction.clone());
+
+                                    // reset found flag
+                                    found_row = false;
+                                    transaction = Transaction::default();
+                                    column_ct = 0;
+                                }
+                            }
+                            _ => {}
                         }
                     }
-                    _ => {}
                 }
             }
         }
