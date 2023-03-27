@@ -2,6 +2,7 @@ use anyhow::{Context, Error};
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use clap::{arg, Command};
 use csv::Writer;
+use std::process::exit;
 use pdf::content::*;
 use pdf::file::File as pdfFile;
 use regex::Regex;
@@ -79,20 +80,19 @@ pub fn parse(path: String, _password: String) -> Result<Vec<Transaction>, Error>
                                         }
 
                                         // XXX: assume the transaction row starts with a date.
-                                        let parsed_datetime = NaiveDateTime::parse_from_str(
-                                            d,
-                                            "%d/%m/%Y %H:%M:%S",
-                                        )
-                                        .or_else(|_| {
-                                            NaiveDate::parse_from_str(d, "%d/%m/%Y").map(
-                                                |date| {
-                                                    NaiveDateTime::new(
-                                                        date,
-                                                        NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
+                                        let parsed_datetime =
+                                            NaiveDateTime::parse_from_str(d, "%d/%m/%Y %H:%M:%S")
+                                                .or_else(|_| {
+                                                    NaiveDate::parse_from_str(d, "%d/%m/%Y").map(
+                                                        |date| {
+                                                            NaiveDateTime::new(
+                                                                date,
+                                                                NaiveTime::from_hms_opt(0, 0, 0)
+                                                                    .unwrap(),
+                                                            )
+                                                        },
                                                     )
-                                                },
-                                            )
-                                        });
+                                                });
 
                                         match parsed_datetime {
                                             Ok(_) => {
@@ -222,7 +222,14 @@ fn main() -> Result<(), Error> {
     let _password = matches.get_one::<String>("password");
     let output = matches.get_one::<String>("output").unwrap().to_string();
 
-    let entries = fs::read_dir(path.unwrap()).unwrap();
+    // path is directory?
+    let entries = match fs::read_dir(path.unwrap()) {
+        Ok(file) => file,
+        Err(err) => {
+            eprintln!("Error opening statements directory: {}", err);
+            exit(1);
+        }
+    };
 
     // Filter pdf files, sort the statement files based on dates in the file names.
     let mut pdf_files: Vec<String> = entries
