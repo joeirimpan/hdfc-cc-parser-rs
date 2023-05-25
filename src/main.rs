@@ -2,12 +2,12 @@ use anyhow::{Context, Error};
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use clap::{arg, Command};
 use csv::Writer;
-use std::process::exit;
 use pdf::content::*;
 use pdf::file::File as pdfFile;
 use regex::Regex;
 use std::fs;
-use std::fs::File;
+use std::io;
+use std::process::exit;
 use std::str::FromStr;
 
 // Transaction row representation.
@@ -212,54 +212,69 @@ fn date_format_to_regex(date_format: &str) -> Regex {
 
 fn main() -> Result<(), Error> {
     let matches = Command::new("HDFC credit card statement parser")
-        .arg(arg!(--dir <path_to_directory>).required(true))
+        .arg(arg!(--dir <path_to_directory>).required_unless_present("file").conflicts_with("file"))
+        .arg(arg!(--file <path_to_file>).required_unless_present("dir").conflicts_with("dir"))
         .arg(arg!(--password <password>).required(false))
-        .arg(arg!(--output <output>).required(true))
         .arg(arg!(--sortformat <date_format>).required(false))
         .get_matches();
 
-    let path = matches.get_one::<String>("dir");
+    let dir_path = matches.get_one::<String>("dir");
+    let file_path = matches.get_one::<String>("file");
     let _password = matches.get_one::<String>("password");
-    let output = matches.get_one::<String>("output").unwrap().to_string();
+
+    let mut pdf_files = Vec::new();
 
     // path is directory?
-    let entries = match fs::read_dir(path.unwrap()) {
-        Ok(file) => file,
-        Err(err) => {
-            eprintln!("Error opening statements directory: {}", err);
-            exit(1);
+    if let Some(dir_path) = dir_path {
+        let entries = match fs::read_dir(dir_path) {
+            Ok(file) => file,
+            Err(err) => {
+                eprintln!("Error opening statements directory: {}", err);
+                exit(1);
+            }
+        };
+
+        // Filter pdf files, sort the statement files based on dates in the file names.
+        pdf_files = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension()
+                    .map_or(false, |ext| ext == "pdf" || ext == "PDF")
+            })
+            .map(|path| path.to_string_lossy().to_string())
+            .collect();
+
+        // Sort only if there is a date format specified
+        if let Some(sort_format) = matches.get_one::<String>("sortformat") {
+            pdf_files.sort_by(|a, b| {
+                let re = date_format_to_regex(sort_format);
+                let a_date = match re.find(a) {
+                    Some(date_str) => {
+                        NaiveDate::parse_from_str(date_str.as_str(), sort_format).unwrap()
+                    }
+                    None => NaiveDate::from_ymd_opt(1970, 1, 1).unwrap(),
+                };
+                let b_date = match re.find(b) {
+                    Some(date_str) => {
+                        NaiveDate::parse_from_str(date_str.as_str(), sort_format).unwrap()
+                    }
+                    None => NaiveDate::from_ymd_opt(1970, 1, 1).unwrap(),
+                };
+                a_date.cmp(&b_date)
+            })
         }
-    };
+    }
 
-    // Filter pdf files, sort the statement files based on dates in the file names.
-    let mut pdf_files: Vec<String> = entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.extension()
-                .map_or(false, |ext| ext == "pdf" || ext == "PDF")
-        })
-        .map(|path| path.to_string_lossy().to_string())
-        .collect();
-
-    // Sort only if there is a date format specified
-    if let Some(sort_format) = matches.get_one::<String>("sortformat") {
-        pdf_files.sort_by(|a, b| {
-            let re = date_format_to_regex(sort_format);
-            let a_date = match re.find(a) {
-                Some(date_str) => {
-                    NaiveDate::parse_from_str(date_str.as_str(), sort_format).unwrap()
-                }
-                None => NaiveDate::from_ymd_opt(1970, 1, 1).unwrap(),
-            };
-            let b_date = match re.find(b) {
-                Some(date_str) => {
-                    NaiveDate::parse_from_str(date_str.as_str(), sort_format).unwrap()
-                }
-                None => NaiveDate::from_ymd_opt(1970, 1, 1).unwrap(),
-            };
-            a_date.cmp(&b_date)
-        })
+    // path is file?
+    if let Some(file_path) = file_path {
+        match fs::metadata(file_path) {
+            Ok(_) => pdf_files.push(file_path.to_string()),
+            Err(err) => {
+                eprintln!("Error opening statement file: {}", err);
+                exit(1);
+            }
+        };
     }
 
     // Parse all the statement files.
@@ -271,9 +286,8 @@ fn main() -> Result<(), Error> {
         )
     }
 
-    // Create a csv file and write the contents of the transaction list
-    let w = File::create(output).context("Unable to create output file")?;
-    let mut csv_writer = Writer::from_writer(w);
+    // Create a csv file anduse std::io::stdout; write the contents of the transaction list
+    let mut csv_writer = Writer::from_writer(io::stdout());
 
     for member in members {
         let row = &[
