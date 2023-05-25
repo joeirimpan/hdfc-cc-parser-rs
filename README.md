@@ -16,7 +16,7 @@ This tool parse and extract information from HDFC Bank credit card statements in
 * Clone this repository: `git clone https://github.com/joeirimpan/hdfc-cc-parser-rs.git`
 * Navigate to the repository directory: cd hdfc-cc-parser-rs
 * Build the project: `cargo build --release`
-* Run the binary: `./target/release/hdfc-cc-parser-rs --dir </path/to/statements> --password <optional password> --output <output.csv> --sortformat="optional format eg., %d-%m-%Y"`
+* Run the binary: `./target/release/hdfc-cc-parser-rs --dir <optional statements directory> --file <optional file path> --password <optional password> --sortformat="optional format eg., %d-%m-%Y"`
 
 ## Why?
 
