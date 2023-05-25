@@ -1,6 +1,6 @@
 [package]
 name = "hdfc-cc-parser-rs"
-version = "0.1.0"
+version = "0.0.5"
 authors = ["Joe Paul <joeirimpan@gmail.com>"]
 repository = "https://github.com/joeirimpan/hdfc-cc-parser-rs"
 keywords = ["HDFC", "credit card", "bill"]
