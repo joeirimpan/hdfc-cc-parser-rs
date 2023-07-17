@@ -216,11 +216,13 @@ fn main() -> Result<(), Error> {
         .arg(arg!(--file <path_to_file>).required_unless_present("dir").conflicts_with("dir"))
         .arg(arg!(--password <password>).required(false))
         .arg(arg!(--sortformat <date_format>).required(false))
+        .arg(arg!(--addheaders).required(false))
         .get_matches();
 
     let dir_path = matches.get_one::<String>("dir");
     let file_path = matches.get_one::<String>("file");
     let _password = matches.get_one::<String>("password");
+    let add_headers = matches.get_flag("addheaders");
 
     let mut pdf_files = Vec::new();
 
@@ -288,6 +290,13 @@ fn main() -> Result<(), Error> {
 
     // Create a csv file anduse std::io::stdout; write the contents of the transaction list
     let mut csv_writer = Writer::from_writer(io::stdout());
+
+    if add_headers {
+        //  writes the header rows to CSV if user passes --addheaders param
+        csv_writer
+            .write_record(&["Date", "Description", "Points", "Amount"])
+            .context("Failed to write headers")?;
+    }
 
     for member in members {
         let row = &[
