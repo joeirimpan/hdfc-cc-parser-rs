@@ -1,14 +1,15 @@
 use anyhow::{Context, Error};
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use clap::{arg, Command};
-use csv::Writer;
 use pdf::content::*;
 use pdf::file::File as pdfFile;
 use regex::Regex;
-use std::fs;
 use std::io;
 use std::process::exit;
 use std::str::FromStr;
+use std::sync::mpsc::{self, Sender};
+use std::thread;
+use std::{fs, vec};
 
 // Transaction row representation.
 #[derive(Debug, Clone)]
@@ -35,11 +36,14 @@ impl Default for Transaction {
 }
 
 // Parse the pdf and return a list of transactions.
-pub fn parse(path: String, _password: String) -> Result<Vec<Transaction>, Error> {
+pub fn parse(
+    path: String,
+    name: String,
+    _password: String,
+    sender: &Sender<Vec<String>>,
+) -> Result<(), Error> {
     let file = pdfFile::<Vec<u8>>::open_password(path.clone(), _password.as_bytes())
         .context(format!("failed to open file {}", path))?;
-
-    let mut members = Vec::new();
 
     // Iterate through pages
     for page in file.pages() {
@@ -72,36 +76,20 @@ pub fn parse(path: String, _password: String) -> Result<Vec<Transaction>, Error>
                                     // figure out the header column count from the table header.
                                     // This makes it easier to figure out the end of transaction lines.
                                     let d = s.trim();
+
                                     if !header_assigned {
                                         // save this value to check in next iteration of Op::BeginText to count header columns.
                                         prev_value = d;
-                                        if d == "" {
-                                            continue;
-                                        }
 
-                                        // XXX: assume the transaction row starts with a date.
-                                        let parsed_datetime =
-                                            NaiveDateTime::parse_from_str(d, "%d/%m/%Y %H:%M:%S")
-                                                .or_else(|_| {
-                                                    NaiveDate::parse_from_str(d, "%d/%m/%Y").map(
-                                                        |date| {
-                                                            NaiveDateTime::new(
-                                                                date,
-                                                                NaiveTime::from_hms_opt(0, 0, 0)
-                                                                    .unwrap(),
-                                                            )
-                                                        },
-                                                    )
-                                                });
-
-                                        match parsed_datetime {
-                                            Ok(_) => {
+                                        // read till name. (that is the header columns)
+                                        match d {
+                                            x if x == name => {
                                                 header_assigned = true;
-                                                // remove card holder name
-                                                header_column_ct -= 1;
-                                                prev_value = "";
+                                                // +1 considering 'Cr' (credit/debit)
+                                                header_column_ct += 1;
+                                                continue;
                                             }
-                                            Err(_) => continue,
+                                            "" | _ => continue,
                                         }
                                     }
 
@@ -143,11 +131,6 @@ pub fn parse(path: String, _password: String) -> Result<Vec<Transaction>, Error>
 
                                     // Must be description or debit/credit representation or reward points
                                     if let Ok(tx) = String::from_str(d) {
-                                        // skip empty string
-                                        if tx == "" {
-                                            continue;
-                                        }
-
                                         // skip reward points
                                         if let Ok(p) = tx.replace("- ", "-").parse::<i32>() {
                                             transaction.points = p;
@@ -169,20 +152,40 @@ pub fn parse(path: String, _password: String) -> Result<Vec<Transaction>, Error>
                             }
 
                             Op::BeginText => {
-                                if !header_assigned && prev_value != "" {
-                                    header_column_ct += 1;
+                                if !header_assigned {
+                                    match prev_value {
+                                        "" => continue,
+                                        "Domestic Transactions" | "International Transactions" => {
+                                            continue
+                                        }
+                                        _ => header_column_ct += 1,
+                                    }
                                 }
                             }
 
                             Op::EndText => {
-                                if found_row && column_ct == header_column_ct {
-                                    // push transaction here
-                                    members.push(transaction.clone());
+                                match column_ct {
+                                    // ignore 0 column_ct
+                                    0 => continue,
 
-                                    // reset found flag
-                                    found_row = false;
-                                    transaction = Transaction::default();
-                                    column_ct = 0;
+                                    x if x == header_column_ct && found_row => {
+                                        // write to stdout
+                                        sender
+                                            .send(vec![
+                                                transaction.date.to_string(),
+                                                transaction.tx.clone(),
+                                                transaction.points.to_string(),
+                                                transaction.amount.to_string(),
+                                            ])
+                                            .context("Failed to write row")?;
+
+                                        // reset found flag
+                                        found_row = false;
+                                        transaction = Transaction::default();
+                                        column_ct = 0;
+                                    }
+
+                                    _ => continue,
                                 }
                             }
                             _ => {}
@@ -193,7 +196,7 @@ pub fn parse(path: String, _password: String) -> Result<Vec<Transaction>, Error>
         }
     }
 
-    Ok(members)
+    Ok(())
 }
 
 fn date_format_to_regex(date_format: &str) -> Regex {
@@ -212,8 +215,17 @@ fn date_format_to_regex(date_format: &str) -> Regex {
 
 fn main() -> Result<(), Error> {
     let matches = Command::new("HDFC credit card statement parser")
-        .arg(arg!(--dir <path_to_directory>).required_unless_present("file").conflicts_with("file"))
-        .arg(arg!(--file <path_to_file>).required_unless_present("dir").conflicts_with("dir"))
+        .arg(
+            arg!(--dir <path_to_directory>)
+                .required_unless_present("file")
+                .conflicts_with("file"),
+        )
+        .arg(
+            arg!(--file <path_to_file>)
+                .required_unless_present("dir")
+                .conflicts_with("dir"),
+        )
+        .arg(arg!(--name <name>).required(true))
         .arg(arg!(--password <password>).required(false))
         .arg(arg!(--sortformat <date_format>).required(false))
         .arg(arg!(--addheaders).required(false))
@@ -221,6 +233,7 @@ fn main() -> Result<(), Error> {
 
     let dir_path = matches.get_one::<String>("dir");
     let file_path = matches.get_one::<String>("file");
+    let name = matches.get_one::<String>("name");
     let _password = matches.get_one::<String>("password");
     let add_headers = matches.get_flag("addheaders");
 
@@ -279,36 +292,45 @@ fn main() -> Result<(), Error> {
         };
     }
 
-    // Parse all the statement files.
-    let mut members = Vec::new();
+    let (tx, rx) = mpsc::channel();
+
+    let writer_thread = thread::spawn(move || -> Result<(), Error> {
+        let mut wtr = csv::Writer::from_writer(io::stdout());
+
+        if add_headers {
+            //  writes the header rows to CSV if user passes --addheaders param
+            wtr.write_record(&["Date", "Description", "Points", "Amount"])
+                .context("Failed to write headers")?;
+        }
+
+        for record in rx {
+            wtr.write_record(&record).context("Failed to write row")?;
+        }
+
+        wtr.flush().context("Error flushing to stdout")?;
+        Ok(())
+    });
+
+    let pass: String = match _password {
+        Some(s) => s.clone(),
+        None => "".to_string(),
+    };
+
+    let n: String = match name {
+        Some(s) => s.clone(),
+        None => "".to_string(),
+    };
+
     for file in pdf_files {
-        members.extend(
-            parse(file, _password.unwrap_or(&"".to_string()).to_string())
-                .context("Failed to parse statement")?,
-        )
+        parse(file, n.clone(), pass.clone(), &tx).context("Failed to parse statement")?;
     }
 
-    // Create a csv file anduse std::io::stdout; write the contents of the transaction list
-    let mut csv_writer = Writer::from_writer(io::stdout());
+    drop(tx);
 
-    if add_headers {
-        //  writes the header rows to CSV if user passes --addheaders param
-        csv_writer
-            .write_record(&["Date", "Description", "Points", "Amount"])
-            .context("Failed to write headers")?;
-    }
-
-    for member in members {
-        let row = &[
-            member.date.to_string(),
-            member.tx.clone(),
-            member.points.to_string(),
-            member.amount.to_string(),
-        ];
-
-        csv_writer
-            .write_record(row)
-            .context("Failed to write row")?
+    match writer_thread.join() {
+        Ok(Ok(_)) => (),
+        Ok(Err(e)) => return Err(e.into()),
+        Err(e) => return Err(anyhow::anyhow!("Thread panicked: {:?}", e)),
     }
 
     Ok(())
