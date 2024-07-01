@@ -1,25 +1,45 @@
+# Cargo.toml file of the HDFC credit card parser written in Rust
+
+# Package information
 [package]
+# Name of the package
 name = "hdfc-cc-parser-rs"
+# Version of the package
 version = "0.0.6"
+# Authors of the package
 authors = ["Joe Paul <joeirimpan@gmail.com>"]
+# Repository URL of the package
 repository = "https://github.com/joeirimpan/hdfc-cc-parser-rs"
+# Keywords for the package
 keywords = ["HDFC", "credit card", "bill"]
+# License of the package
 license = "MIT"
+# Edition of Rust used in the package
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+# Dependencies
 
+# Anyhow is used for handling errors
 [dependencies]
 anyhow = "1.0.68"
+# Chrono is used for date and time handling
 chrono = "0.4.23"
+# CSV is used for reading and writing CSV files
 csv = "1.1.6"
+# PDF is used for parsing PDF files
 pdf = { git = "https://github.com/pdf-rs/pdf", features = [ "euclid" ], rev = "5cf56b7" }
+# Regex is used for regular expressions
 regex = "1.7.1"
-pdf_encoding = "0.3.0"
+# PDF encoding is used for encoding and decoding PDF files
+pdf_encoding = "0.4.0"
+# Euclid is used for geometric operations
 euclid = "0.22.6"
+# Log is used for logging
 log = "*"
+# Clap is used for command line argument parsing
 clap = "4.1.8"
 
+# Optimization options for release builds
 [profile.release]
 strip = true
 opt-level = "z"
