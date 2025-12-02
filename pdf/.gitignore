@@ -1,0 +1,10 @@
+target/
+**/*.rs.bk
+Cargo.lock
+**/*.orig
+**/perf.data
+**/perf.data.old
+
+!.travis.yml
+
+/fonts
