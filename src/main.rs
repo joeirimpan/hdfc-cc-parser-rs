@@ -4,6 +4,8 @@ use clap::{arg, Command};
 use pdf::content::*;
 use pdf::file::File as PdfFile;
 use regex::Regex;
+use serde_json;
+use std::collections::HashMap;
 use std::io;
 use std::process::exit;
 use std::sync::mpsc::{self, Sender};
@@ -155,6 +157,137 @@ fn is_foreign_currency(text: &str) -> bool {
 /// Check if text should be skipped (standalone symbols/markers).
 fn is_skippable_symbol(text: &str) -> bool {
     matches!(text, "+" | "C" | "₹" | "l" | "●" | "•" | "Cr")
+}
+
+// ============================================================================
+// Summary Feature
+// ============================================================================
+
+/// Summary of transactions for reporting.
+#[derive(Default)]
+struct Summary {
+    total_spent: f32,
+    bill_payment: f32,
+    total_points: i32,
+    category_totals: HashMap<String, f32>,
+    uncategorized: f32,
+    transaction_count: usize,
+}
+
+/// Load category patterns from a JSON file.
+/// Format: {"Category Name": ["PATTERN1", "PATTERN2"], ...}
+fn load_categories(path: &str) -> Result<HashMap<String, Vec<String>>, Error> {
+    let content = fs::read_to_string(path)
+        .context(format!("Failed to read categories file: {}", path))?;
+    let categories: HashMap<String, Vec<String>> = serde_json::from_str(&content)
+        .context("Failed to parse categories JSON")?;
+    Ok(categories)
+}
+
+/// Check if a transaction is a credit card bill payment.
+fn is_bill_payment(description: &str) -> bool {
+    description.to_uppercase().contains("CREDIT CARD PAYMENT")
+}
+
+/// Find the category for a transaction based on description patterns.
+fn categorize(description: &str, categories: &HashMap<String, Vec<String>>) -> Option<String> {
+    let desc_upper = description.to_uppercase();
+    for (category, patterns) in categories {
+        for pattern in patterns {
+            if desc_upper.contains(&pattern.to_uppercase()) {
+                return Some(category.clone());
+            }
+        }
+    }
+    None
+}
+
+/// Parse a CSV record back into transaction fields for summary calculation.
+fn parse_record(record: &[String]) -> (String, i32, f32) {
+    let description = record.get(1).cloned().unwrap_or_default();
+    let points = record.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+    let amount = record.get(3).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+    (description, points, amount)
+}
+
+/// Calculate summary from transaction records.
+fn calculate_summary(
+    records: &[Vec<String>],
+    categories: &Option<HashMap<String, Vec<String>>>,
+) -> Summary {
+    let mut summary = Summary::default();
+
+    for record in records {
+        let (description, points, amount) = parse_record(record);
+        summary.transaction_count += 1;
+        summary.total_points += points;
+
+        if is_bill_payment(&description) {
+            summary.bill_payment += amount;
+        } else if amount < 0.0 {
+            // Debit transaction (spending)
+            let spent = amount.abs();
+            summary.total_spent += spent;
+
+            // Categorize if categories provided
+            if let Some(cats) = categories {
+                if let Some(category) = categorize(&description, cats) {
+                    *summary.category_totals.entry(category).or_insert(0.0) += spent;
+                } else {
+                    summary.uncategorized += spent;
+                }
+            }
+        }
+    }
+
+    summary
+}
+
+/// Print summary to stdout.
+fn print_summary(summary: &Summary, has_categories: bool) {
+    println!();
+    println!("═══════════════════════════════════════════");
+    println!("              SUMMARY");
+    println!("═══════════════════════════════════════════");
+    println!("Total Spent:          ₹ {:>12.2}", summary.total_spent);
+    println!("Bill Payment:         ₹ {:>12.2}", summary.bill_payment);
+    println!("Points Earned:        {:>15}", summary.total_points);
+    println!("Transactions:         {:>15}", summary.transaction_count);
+
+    if has_categories && !summary.category_totals.is_empty() {
+        println!();
+        println!("───────────────────────────────────────────");
+        println!("         CATEGORY BREAKDOWN");
+        println!("───────────────────────────────────────────");
+
+        // Sort categories by amount (descending)
+        let mut sorted: Vec<_> = summary.category_totals.iter().collect();
+        sorted.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap());
+
+        for (category, amount) in sorted {
+            let percentage = if summary.total_spent > 0.0 {
+                (amount / summary.total_spent) * 100.0
+            } else {
+                0.0
+            };
+            println!("{:<20}  ₹ {:>10.2}  ({:>5.1}%)", category, amount, percentage);
+        }
+
+        if summary.uncategorized > 0.0 {
+            let percentage = if summary.total_spent > 0.0 {
+                (summary.uncategorized / summary.total_spent) * 100.0
+            } else {
+                0.0
+            };
+            println!(
+                "{:<20}  ₹ {:>10.2}  ({:>5.1}%)",
+                "Uncategorized", summary.uncategorized, percentage
+            );
+        }
+
+        println!("───────────────────────────────────────────");
+    }
+    println!();
 }
 
 // ============================================================================
@@ -472,6 +605,8 @@ fn main() -> Result<(), Error> {
         .arg(arg!(--password <password>).required(false))
         .arg(arg!(--sortformat <date_format>).required(false))
         .arg(arg!(--addheaders).required(false))
+        .arg(arg!(--summary).required(false))
+        .arg(arg!(--categories <categories_file>).required(false))
         .get_matches();
 
     let dir_path = matches.get_one::<String>("dir");
@@ -479,6 +614,8 @@ fn main() -> Result<(), Error> {
     let name = matches.get_one::<String>("name").cloned().unwrap_or_default();
     let password = matches.get_one::<String>("password").cloned().unwrap_or_default();
     let add_headers = matches.get_flag("addheaders");
+    let show_summary = matches.get_flag("summary");
+    let categories_path = matches.get_one::<String>("categories");
 
     // Collect PDF files
     let mut pdf_files = if let Some(dir) = dir_path {
@@ -500,22 +637,38 @@ fn main() -> Result<(), Error> {
         sort_files_by_date(&mut pdf_files, sort_format);
     }
 
+    // Load categories if provided
+    let categories: Option<HashMap<String, Vec<String>>> = if let Some(path) = categories_path {
+        Some(load_categories(path)?)
+    } else {
+        None
+    };
+
     // Set up channel for CSV writing
     let (tx, rx) = mpsc::channel();
 
     let writer_thread = thread::spawn(move || -> Result<(), Error> {
-        let mut wtr = csv::Writer::from_writer(io::stdout());
+        if show_summary {
+            // Summary mode: collect records and show summary only (no CSV)
+            let records: Vec<Vec<String>> = rx.into_iter().collect();
+            let summary = calculate_summary(&records, &categories);
+            print_summary(&summary, categories.is_some());
+        } else {
+            // Normal mode: write CSV to stdout
+            let mut wtr = csv::Writer::from_writer(io::stdout());
 
-        if add_headers {
-            wtr.write_record(["Date", "Description", "Points", "Amount"])
-                .context("Failed to write headers")?;
+            if add_headers {
+                wtr.write_record(["Date", "Description", "Points", "Amount"])
+                    .context("Failed to write headers")?;
+            }
+
+            for record in rx {
+                wtr.write_record(&record).context("Failed to write row")?;
+            }
+
+            wtr.flush().context("Error flushing to stdout")?;
         }
 
-        for record in rx {
-            wtr.write_record(&record).context("Failed to write row")?;
-        }
-
-        wtr.flush().context("Error flushing to stdout")?;
         Ok(())
     });
 

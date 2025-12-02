@@ -1,0 +1,10 @@
+{
+  "Food & Dining": ["SWIGGY", "ZOMATO", "BLINKIT", "INSTAMART", "DOMINOS", "KFC", "MCDONALDS", "STARBUCKS"],
+  "Travel": ["UBER", "OLA", "IRCTC", "MAKEMYTRIP", "TRIP.COM", "CLEARTRIP", "GOIBIBO", "EMI TRIP"],
+  "Shopping": ["AMAZON", "FLIPKART", "MYNTRA", "AJIO", "NYKAA", "MEESHO"],
+  "Entertainment": ["NETFLIX", "SPOTIFY", "GOOGLE PLAY", "APPLE", "HOTSTAR", "PRIME VIDEO"],
+  "Utilities": ["BESCOM", "BWSSB", "JIO", "AIRTEL", "VODAFONE", "TATA PLAY"],
+  "Groceries": ["BIGBASKET", "DMART", "MORE", "RELIANCE FRESH", "SPAR"],
+  "Fuel": ["IOCL", "BPCL", "HPCL", "SHELL", "INDIAN OIL"],
+  "Finance": ["IGST", "GST", "FINANCE CHARGES", "DCC Transaction"]
+}
