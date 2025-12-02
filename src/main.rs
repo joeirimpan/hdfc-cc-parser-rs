@@ -2,25 +2,23 @@ use anyhow::{Context, Error};
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use clap::{arg, Command};
 use pdf::content::*;
-use pdf::file::File as pdfFile;
+use pdf::file::File as PdfFile;
 use regex::Regex;
 use std::io;
 use std::process::exit;
-use std::str::FromStr;
 use std::sync::mpsc::{self, Sender};
 use std::thread;
 use std::{fs, vec};
 
-// Transaction row representation.
+/// Transaction row representation.
 #[derive(Debug, Clone)]
 pub struct Transaction {
     pub date: NaiveDateTime,
-    pub tx: String,
+    pub description: String,
     pub points: i32,
     pub amount: f32,
 }
 
-// default values for new Transaction.
 impl Default for Transaction {
     fn default() -> Self {
         Transaction {
@@ -28,177 +26,379 @@ impl Default for Transaction {
                 NaiveDate::from_ymd_opt(1970, 1, 1).unwrap(),
                 NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
             ),
-            tx: "".to_owned(),
+            description: String::new(),
             points: 0,
             amount: 0.0,
         }
     }
 }
 
-// Parse the pdf and return a list of transactions.
-pub fn parse(
-    path: String,
-    name: String,
-    _password: String,
-    sender: &Sender<Vec<String>>,
-) -> Result<(), Error> {
-    let file = pdfFile::<Vec<u8>>::open_password(path.clone(), _password.as_bytes())
-        .context(format!("failed to open file {}", path))?;
+impl Transaction {
+    /// Send this transaction to the CSV writer channel.
+    fn emit(&self, sender: &Sender<Vec<String>>) -> Result<(), Error> {
+        sender
+            .send(vec![
+                self.date.to_string(),
+                self.description.clone(),
+                self.points.to_string(),
+                self.amount.to_string(),
+            ])
+            .context("Failed to send transaction to writer")
+    }
+}
 
-    // Iterate through pages
-    for page in file.pages() {
-        if let Ok(page) = page {
-            if let Some(content) = &page.contents {
-                if let Ok(ops) = content.operations(&file) {
-                    let mut transaction = Transaction::default();
+// ============================================================================
+// Date/Amount/Points Parsing Helpers
+// ============================================================================
 
-                    let mut found_row = false;
-                    let mut column_ct = 0;
-                    let mut header_assigned = false;
-                    let mut header_column_ct = 0;
-                    let mut prev_value = "";
+/// Date formats used in HDFC statements.
+const DATE_FORMATS: &[&str] = &[
+    "%d/%m/%Y| %H:%M",  // Domestic: "19/10/2025| 00:57"
+    "%d/%m/%Y | %H:%M", // International: "26/09/2025 | 13:33"
+    "%d/%m/%Y %H:%M:%S", // Old format with seconds
+];
 
-                    for op in ops.iter().skip_while(|op| match op {
-                        Op::TextDraw { ref text } => {
-                            let data = text.as_bytes();
-                            if let Ok(s) = std::str::from_utf8(data) {
-                                return s.trim() != "Domestic Transactions"
-                                    && s.trim() != "International Transactions";
-                            }
-                            return true;
-                        }
-                        _ => return true,
-                    }) {
-                        match op {
-                            Op::TextDraw { ref text } => {
-                                let data = text.as_bytes();
-                                if let Ok(s) = std::str::from_utf8(data) {
-                                    // figure out the header column count from the table header.
-                                    // This makes it easier to figure out the end of transaction lines.
-                                    let d = s.trim();
+/// Try to parse a date string from various formats used in HDFC statements.
+fn parse_transaction_date(s: &str) -> Option<NaiveDateTime> {
+    // Try datetime formats first
+    for format in DATE_FORMATS {
+        if let Ok(dt) = NaiveDateTime::parse_from_str(s, format) {
+            return Some(dt);
+        }
+    }
+    // Try date-only format
+    if let Ok(d) = NaiveDate::parse_from_str(s, "%d/%m/%Y") {
+        return Some(NaiveDateTime::new(
+            d,
+            NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
+        ));
+    }
+    None
+}
 
-                                    if !header_assigned {
-                                        // save this value to check in next iteration of Op::BeginText to count header columns.
-                                        prev_value = d;
+/// Try to parse an amount string, handling currency symbols and credit markers.
+fn parse_amount(s: &str, is_credit: bool) -> Option<f32> {
+    let clean = s
+        .replace('₹', "")
+        .replace('\u{20b9}', "")
+        .replace(',', "")
+        .trim()
+        .to_string();
 
-                                        // read till name. (that is the header columns)
-                                        match d {
-                                            x if x == name => {
-                                                header_assigned = true;
-                                                // +1 considering 'Cr' (credit/debit)
-                                                header_column_ct += 1;
-                                                continue;
-                                            }
-                                            "" | _ => continue,
-                                        }
-                                    }
+    let (is_credit, num_str) = if clean.starts_with('+') {
+        (true, clean.trim_start_matches('+').trim())
+    } else {
+        (is_credit, clean.as_str())
+    };
 
-                                    column_ct += 1;
-                                    if d == "" {
-                                        if !found_row {
-                                            column_ct -= 1;
-                                        }
+    num_str
+        .parse::<f32>()
+        .ok()
+        .map(|amt| if is_credit { amt } else { -amt })
+}
 
-                                        continue;
-                                    }
+/// Try to parse reward points from various formats.
+fn parse_points(s: &str) -> Option<i32> {
+    s.replace("+ ", "+")
+        .replace("- ", "-")
+        .trim()
+        .parse::<i32>()
+        .ok()
+}
 
-                                    if column_ct == 1 {
-                                        if let Ok(tx_date) =
-                                            NaiveDateTime::parse_from_str(d, "%d/%m/%Y %H:%M:%S")
-                                        {
-                                            found_row = true;
-                                            transaction.date = tx_date;
-                                            continue;
-                                        }
-                                        if let Ok(tx_date) =
-                                            NaiveDate::parse_from_str(d, "%d/%m/%Y")
-                                        {
-                                            found_row = true;
-                                            transaction.date = NaiveDateTime::new(
-                                                tx_date,
-                                                NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
-                                            );
-                                            continue;
-                                        }
-                                    }
+// ============================================================================
+// Text Classification Helpers
+// ============================================================================
 
-                                    if column_ct > 2 && d.contains(".") {
-                                        if let Ok(amt) = d.replace(",", "").parse::<f32>() {
-                                            transaction.amount = amt * -1.0;
-                                            continue;
-                                        }
-                                    }
+/// Section terminators that end a transaction block.
+const SECTION_TERMINATORS: &[&str] = &[
+    "Eligible for EMI",
+    "Eligible for",
+    "TRANSACTIONS",
+    "Past Dues",
+    "GST Summary",
+    "Rewards Program Points Summary",
+    "Offers on your card",
+    "TOTAL AMOUNT",
+    "CONVERT TO EMI",
+];
 
-                                    // Must be description or debit/credit representation or reward points
-                                    if let Ok(tx) = String::from_str(d) {
-                                        // skip reward points
-                                        if let Ok(p) = tx.replace("- ", "-").parse::<i32>() {
-                                            transaction.points = p;
-                                            continue;
-                                        }
+/// Foreign currency prefixes (amounts in foreign currency are part of description).
+const FOREIGN_CURRENCY_PREFIXES: &[&str] =
+    &["USD ", "JPY ", "MYR ", "EUR ", "GBP ", "SGD ", "AUD ", "THB "];
 
-                                        // mark it as credit
-                                        if column_ct > 3 && tx == "Cr" {
-                                            transaction.amount *= -1.0;
-                                            continue;
-                                        }
+/// Check if text is a section terminator.
+fn is_section_terminator(text: &str) -> bool {
+    SECTION_TERMINATORS.contains(&text) || text.starts_with("*Transaction time")
+}
 
-                                        // assume transaction description to be next to date
-                                        if column_ct == 2 {
-                                            transaction.tx = tx;
-                                        }
-                                    }
-                                }
-                            }
+/// Check if text is a page header (appears on continuation pages).
+fn is_page_header(text: &str) -> bool {
+    text == "Infinia Credit Card Statement"
+        || text.starts_with("HSN Code:")
+        || text.starts_with("HDFC Bank Credit Cards GSTIN:")
+        || text.contains("GSTIN: 33AAACH")
+}
 
-                            Op::BeginText => {
-                                if !header_assigned {
-                                    match prev_value {
-                                        "" => continue,
-                                        "Domestic Transactions" | "International Transactions" => {
-                                            continue
-                                        }
-                                        _ => header_column_ct += 1,
-                                    }
-                                }
-                            }
+/// Check if text is a page number like "Page 1 of 7".
+fn is_page_number(text: &str) -> bool {
+    text.starts_with("Page ") && text.contains(" of ")
+}
 
-                            Op::EndText => {
-                                match column_ct {
-                                    // ignore 0 column_ct
-                                    0 => continue,
+/// Check if text is a foreign currency amount.
+fn is_foreign_currency(text: &str) -> bool {
+    FOREIGN_CURRENCY_PREFIXES
+        .iter()
+        .any(|prefix| text.starts_with(prefix))
+}
 
-                                    x if x == header_column_ct && found_row => {
-                                        // write to stdout
-                                        sender
-                                            .send(vec![
-                                                transaction.date.to_string(),
-                                                transaction.tx.clone(),
-                                                transaction.points.to_string(),
-                                                transaction.amount.to_string(),
-                                            ])
-                                            .context("Failed to write row")?;
+/// Check if text should be skipped (standalone symbols/markers).
+fn is_skippable_symbol(text: &str) -> bool {
+    matches!(text, "+" | "C" | "₹" | "l" | "●" | "•" | "Cr")
+}
 
-                                        // reset found flag
-                                        found_row = false;
-                                        transaction = Transaction::default();
-                                        column_ct = 0;
-                                    }
+// ============================================================================
+// PDF Text Extraction
+// ============================================================================
 
-                                    _ => continue,
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
+/// Extract all non-empty text elements from a PDF page.
+fn extract_page_texts(ops: &[Op]) -> Vec<String> {
+    ops.iter()
+        .filter_map(|op| {
+            if let Op::TextDraw { ref text } = op {
+                std::str::from_utf8(text.as_bytes())
+                    .ok()
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+// ============================================================================
+// Parser State Machine
+// ============================================================================
+
+/// State for parsing transactions from a page.
+struct ParserState {
+    in_transactions: bool,
+    past_header: bool,
+    skip_next_non_date: bool,
+    in_row: bool,
+    has_amount: bool,
+    is_credit: bool,
+    transaction: Transaction,
+    desc_parts: Vec<String>,
+    debug: bool,
+}
+
+impl ParserState {
+    fn new(debug: bool) -> Self {
+        ParserState {
+            in_transactions: false,
+            past_header: false,
+            skip_next_non_date: false,
+            in_row: false,
+            has_amount: false,
+            is_credit: false,
+            transaction: Transaction::default(),
+            desc_parts: Vec::new(),
+            debug,
+        }
+    }
+
+    /// Finalize and emit the current transaction if valid.
+    fn flush_transaction(&mut self, sender: &Sender<Vec<String>>, reason: &str) -> Result<(), Error> {
+        if self.in_row && !self.transaction.description.is_empty() {
+            if !self.desc_parts.is_empty() {
+                self.transaction.description = self.desc_parts.join(" ");
+            }
+            self.transaction.emit(sender)?;
+            if self.debug {
+                eprintln!("=== EMIT ({}): {:?} ===", reason, self.transaction);
             }
         }
+        Ok(())
+    }
+
+    /// Reset state for a new transaction.
+    fn start_new_transaction(&mut self, date: NaiveDateTime) {
+        self.transaction = Transaction::default();
+        self.transaction.date = date;
+        self.in_row = true;
+        self.has_amount = false;
+        self.is_credit = false;
+        self.desc_parts.clear();
+    }
+
+    /// Reset state when exiting a transaction section.
+    fn exit_section(&mut self) {
+        self.in_transactions = false;
+        self.transaction = Transaction::default();
+        self.in_row = false;
+        self.has_amount = false;
+        self.desc_parts.clear();
+    }
+}
+
+// ============================================================================
+// Main Parser
+// ============================================================================
+
+/// Parse a PDF file and send transactions to the channel.
+pub fn parse(
+    path: String,
+    cardholder_name: String,
+    password: String,
+    sender: &Sender<Vec<String>>,
+) -> Result<(), Error> {
+    let file = PdfFile::<Vec<u8>>::open_password(path.clone(), password.as_bytes())
+        .context(format!("failed to open file {}", path))?;
+
+    let debug = std::env::var("DEBUG").is_ok();
+
+    for page in file.pages() {
+        let page = match page {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+
+        let content = match &page.contents {
+            Some(c) => c,
+            None => continue,
+        };
+
+        let ops = match content.operations(&file) {
+            Ok(o) => o,
+            Err(_) => continue,
+        };
+
+        let texts = extract_page_texts(&ops);
+        let mut state = ParserState::new(debug);
+
+        for (i, text) in texts.iter().enumerate() {
+            if debug {
+                eprintln!("{}: {:?}", i, text);
+            }
+
+            // Start of transaction section
+            if text == "Domestic Transactions" || text == "International Transactions" {
+                state.in_transactions = true;
+                state.past_header = false;
+                continue;
+            }
+
+            if !state.in_transactions {
+                continue;
+            }
+
+            // Skip header row until we see cardholder name or PI column
+            if !state.past_header {
+                if text == &cardholder_name || text == "PI" {
+                    state.past_header = true;
+                    state.skip_next_non_date = true;
+                    if debug {
+                        eprintln!("=== PAST HEADER (trigger: {}) ===", text);
+                    }
+                }
+                continue;
+            }
+
+            // Skip cardholder name that appears right after header
+            if state.skip_next_non_date {
+                state.skip_next_non_date = false;
+                if parse_transaction_date(text).is_none() {
+                    if debug {
+                        eprintln!("=== SKIP CARDHOLDER NAME: {} ===", text);
+                    }
+                    continue;
+                }
+            }
+
+            // Check for section end
+            if is_section_terminator(text) {
+                state.flush_transaction(sender, "section end")?;
+                state.exit_section();
+                continue;
+            }
+
+            // Try to parse as a date (starts a new transaction)
+            if let Some(dt) = parse_transaction_date(text) {
+                state.flush_transaction(sender, "new date")?;
+                state.start_new_transaction(dt);
+                continue;
+            }
+
+            if !state.in_row {
+                continue;
+            }
+
+            // Skip various non-data elements
+            if is_skippable_symbol(text) {
+                if text == "+" {
+                    state.is_credit = true;
+                } else if text == "Cr" {
+                    state.transaction.amount = state.transaction.amount.abs();
+                }
+                continue;
+            }
+
+            if is_page_number(text) || is_page_header(text) {
+                continue;
+            }
+
+            // Foreign currency amounts are part of the description
+            if is_foreign_currency(text) {
+                state.desc_parts.push(text.clone());
+                continue;
+            }
+
+            // Try to parse as amount
+            if text.contains('.') {
+                if let Some(amt) = parse_amount(text, state.is_credit) {
+                    state.transaction.amount = amt;
+                    state.has_amount = true;
+                    state.is_credit = false;
+                    continue;
+                }
+            }
+
+            // Try to parse as points
+            if let Some(p) = parse_points(text) {
+                state.transaction.points = p;
+                continue;
+            }
+
+            // After amount, any remaining text is likely a section header (cardholder name)
+            if state.has_amount {
+                if debug {
+                    eprintln!("=== SKIP POST-AMOUNT TEXT: {} ===", text);
+                }
+                continue;
+            }
+
+            // Must be part of description
+            state.desc_parts.push(text.clone());
+            if state.transaction.description.is_empty() {
+                state.transaction.description = text.clone();
+            }
+        }
+
+        // Flush last transaction on page
+        state.flush_transaction(sender, "page end")?;
     }
 
     Ok(())
 }
 
+// ============================================================================
+// File Sorting Utilities
+// ============================================================================
+
+/// Convert a date format string to a regex pattern.
 fn date_format_to_regex(date_format: &str) -> Regex {
     let regex_str = date_format
         .replace("%Y", r"\d{4}")
@@ -211,6 +411,49 @@ fn date_format_to_regex(date_format: &str) -> Regex {
         .replace("%Z", r"[A-Z]{3}");
 
     Regex::new(&regex_str).unwrap()
+}
+
+/// Extract date from filename using the given format.
+fn extract_date_from_filename(filename: &str, format: &str, regex: &Regex) -> NaiveDate {
+    regex
+        .find(filename)
+        .and_then(|m| NaiveDate::parse_from_str(m.as_str(), format).ok())
+        .unwrap_or_else(|| NaiveDate::from_ymd_opt(1970, 1, 1).unwrap())
+}
+
+// ============================================================================
+// CLI and Main
+// ============================================================================
+
+/// Collect PDF files from a directory.
+fn collect_pdf_files(dir_path: &str) -> Vec<String> {
+    let entries = match fs::read_dir(dir_path) {
+        Ok(e) => e,
+        Err(err) => {
+            eprintln!("Error opening statements directory: {}", err);
+            exit(1);
+        }
+    };
+
+    entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .map_or(false, |ext| ext.eq_ignore_ascii_case("pdf"))
+        })
+        .map(|path| path.to_string_lossy().to_string())
+        .collect()
+}
+
+/// Sort PDF files by date extracted from filename.
+fn sort_files_by_date(files: &mut [String], date_format: &str) {
+    let regex = date_format_to_regex(date_format);
+    files.sort_by(|a, b| {
+        let a_date = extract_date_from_filename(a, date_format, &regex);
+        let b_date = extract_date_from_filename(b, date_format, &regex);
+        a_date.cmp(&b_date)
+    });
 }
 
 fn main() -> Result<(), Error> {
@@ -233,73 +476,38 @@ fn main() -> Result<(), Error> {
 
     let dir_path = matches.get_one::<String>("dir");
     let file_path = matches.get_one::<String>("file");
-    let name = matches.get_one::<String>("name");
-    let _password = matches.get_one::<String>("password");
+    let name = matches.get_one::<String>("name").cloned().unwrap_or_default();
+    let password = matches.get_one::<String>("password").cloned().unwrap_or_default();
     let add_headers = matches.get_flag("addheaders");
 
-    let mut pdf_files = Vec::new();
-
-    // path is directory?
-    if let Some(dir_path) = dir_path {
-        let entries = match fs::read_dir(dir_path) {
-            Ok(file) => file,
-            Err(err) => {
-                eprintln!("Error opening statements directory: {}", err);
-                exit(1);
-            }
-        };
-
-        // Filter pdf files, sort the statement files based on dates in the file names.
-        pdf_files = entries
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .filter(|path| {
-                path.extension()
-                    .map_or(false, |ext| ext == "pdf" || ext == "PDF")
-            })
-            .map(|path| path.to_string_lossy().to_string())
-            .collect();
-
-        // Sort only if there is a date format specified
-        if let Some(sort_format) = matches.get_one::<String>("sortformat") {
-            pdf_files.sort_by(|a, b| {
-                let re = date_format_to_regex(sort_format);
-                let a_date = match re.find(a) {
-                    Some(date_str) => {
-                        NaiveDate::parse_from_str(date_str.as_str(), sort_format).unwrap()
-                    }
-                    None => NaiveDate::from_ymd_opt(1970, 1, 1).unwrap(),
-                };
-                let b_date = match re.find(b) {
-                    Some(date_str) => {
-                        NaiveDate::parse_from_str(date_str.as_str(), sort_format).unwrap()
-                    }
-                    None => NaiveDate::from_ymd_opt(1970, 1, 1).unwrap(),
-                };
-                a_date.cmp(&b_date)
-            })
-        }
-    }
-
-    // path is file?
-    if let Some(file_path) = file_path {
-        match fs::metadata(file_path) {
-            Ok(_) => pdf_files.push(file_path.to_string()),
+    // Collect PDF files
+    let mut pdf_files = if let Some(dir) = dir_path {
+        collect_pdf_files(dir)
+    } else if let Some(file) = file_path {
+        match fs::metadata(file) {
+            Ok(_) => vec![file.to_string()],
             Err(err) => {
                 eprintln!("Error opening statement file: {}", err);
                 exit(1);
             }
-        };
+        }
+    } else {
+        Vec::new()
+    };
+
+    // Sort files by date if format specified
+    if let Some(sort_format) = matches.get_one::<String>("sortformat") {
+        sort_files_by_date(&mut pdf_files, sort_format);
     }
 
+    // Set up channel for CSV writing
     let (tx, rx) = mpsc::channel();
 
     let writer_thread = thread::spawn(move || -> Result<(), Error> {
         let mut wtr = csv::Writer::from_writer(io::stdout());
 
         if add_headers {
-            //  writes the header rows to CSV if user passes --addheaders param
-            wtr.write_record(&["Date", "Description", "Points", "Amount"])
+            wtr.write_record(["Date", "Description", "Points", "Amount"])
                 .context("Failed to write headers")?;
         }
 
@@ -311,26 +519,18 @@ fn main() -> Result<(), Error> {
         Ok(())
     });
 
-    let pass: String = match _password {
-        Some(s) => s.clone(),
-        None => "".to_string(),
-    };
-
-    let n: String = match name {
-        Some(s) => s.clone(),
-        None => "".to_string(),
-    };
-
+    // Parse all PDF files
     for file in pdf_files {
-        parse(file, n.clone(), pass.clone(), &tx).context("Failed to parse statement")?;
+        parse(file, name.clone(), password.clone(), &tx).context("Failed to parse statement")?;
     }
 
     drop(tx);
 
+    // Wait for writer thread
     match writer_thread.join() {
         Ok(Ok(_)) => (),
-        Ok(Err(e)) => return Err(e.into()),
-        Err(e) => return Err(anyhow::anyhow!("Thread panicked: {:?}", e)),
+        Ok(Err(e)) => return Err(e),
+        Err(e) => return Err(anyhow::anyhow!("Writer thread panicked: {:?}", e)),
     }
 
     Ok(())
