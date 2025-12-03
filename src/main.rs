@@ -186,7 +186,8 @@ fn load_categories(path: &str) -> Result<HashMap<String, Vec<String>>, Error> {
 
 /// Check if a transaction is a credit card bill payment.
 fn is_bill_payment(description: &str) -> bool {
-    description.to_uppercase().contains("CREDIT CARD PAYMENT")
+    let desc_upper = description.to_uppercase();
+    desc_upper.contains("CREDIT CARD PAYMENT") || desc_upper.contains("NETBANKING TRANSFER")
 }
 
 /// Find the category for a transaction based on description patterns.
