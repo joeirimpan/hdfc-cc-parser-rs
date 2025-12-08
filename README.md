@@ -78,7 +78,7 @@ Add `--categories` with a JSON file to see spending by category:
   --name "YOUR NAME" \
   --password "PDF_PASSWORD" \
   --summary \
-  --categories categories.json
+  --categories examples/categories.json
 ```
 
 Output:
@@ -134,6 +134,62 @@ Patterns are matched case-insensitively against transaction descriptions.
 ## Performance
 
 A similar Python implementation using tabula-py took 70s+ to process 8 PDFs. This Rust implementation processes the same in ~0.02s.
+
+## Spending Analyzer
+
+A Python script for detailed spending analysis with visualizations.
+
+### Features
+
+* Monthly breakdown by category
+* Month-over-month trend analysis
+* Category trend comparison (first half vs second half)
+* Spending volatility metrics
+* Visual charts (bar graphs, stacked category charts)
+* Support for custom billing cycle start dates (1-31)
+
+### Usage
+
+```bash
+# Basic analysis (calendar months)
+python analyze_spending.py --csv dump.csv --categories categories.json
+
+# Custom billing cycle (e.g., 16th to 16th)
+python analyze_spending.py --csv dump.csv --categories categories.json --cycle-start 16
+
+# Skip graph generation
+python analyze_spending.py --csv dump.csv --categories categories.json --no-graph
+```
+
+### Options
+
+| Option | Description |
+|--------|-------------|
+| `--csv <path>` | Path to transaction CSV file (default: dump.csv) |
+| `--categories <path>` | Path to categories JSON file (default: custom.json) |
+| `--output <path>` | Output path for graph (default: spending_analysis.png) |
+| `--cycle-start <day>` | Day of month when billing cycle starts (1-31, default: 1) |
+| `--no-graph` | Skip graph generation |
+
+For `--cycle-start` values 29-31, the script automatically adjusts for shorter months (Feb uses 28/29, Apr/Jun/Sep/Nov use 30).
+
+### Sample Output
+
+![Spending Analysis](examples/spending_analysis.png)
+
+### Dependencies
+
+```bash
+pip install matplotlib
+```
+
+## Examples
+
+The `examples/` folder contains sample files:
+
+* `dump.csv` - Sample transaction data
+* `categories.json` - Sample category patterns
+* `spending_analysis.png` - Sample generated chart
 
 ## Analytics with ClickHouse
 
