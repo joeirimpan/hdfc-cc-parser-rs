@@ -105,18 +105,21 @@ def get_cycle_key(date, cycle_start_day):
 
 
 def process_transactions(transactions, categories, cycle_start_day=1):
-    """Process transactions and compute monthly data."""
+    """Process transactions and compute monthly data.
+
+    Includes both spending (negative amounts) and credits/refunds (positive amounts)
+    to calculate net spending. Excludes actual card payments.
+    """
     monthly_data = defaultdict(lambda: defaultdict(float))
     monthly_totals = defaultdict(float)
+    monthly_credits = defaultdict(float)
 
     for t in transactions:
         amount = float(t["Amount"])
         desc = t["Description"]
         date_str = t["Date"]
 
-        # Skip credits/payments
-        if amount >= 0:
-            continue
+        # Skip actual card payments (not refunds/credits)
         if (
             "CREDIT CARD PAYMENT" in desc.upper()
             or "CC PAYMENT" in desc.upper()
@@ -128,11 +131,16 @@ def process_transactions(transactions, categories, cycle_start_day=1):
         date = datetime.strptime(date_str.split()[0], "%Y-%m-%d")
         month_key = get_cycle_key(date, cycle_start_day)
 
-        category = categorize(desc, categories)
-        spend = abs(amount)
-
-        monthly_data[month_key][category] += spend
-        monthly_totals[month_key] += spend
+        if amount < 0:
+            # Spending (negative amount)
+            category = categorize(desc, categories)
+            spend = abs(amount)
+            monthly_data[month_key][category] += spend
+            monthly_totals[month_key] += spend
+        else:
+            # Credit/refund (positive amount) - subtract from total
+            monthly_credits[month_key] += amount
+            monthly_totals[month_key] -= amount
 
     return monthly_data, monthly_totals
 
