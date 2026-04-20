@@ -1,8 +1,11 @@
 # HDFC CC bill parser
 
-Parse and extract transaction data from HDFC Bank Infinia credit card statements to CSV format.
+Parse and extract transaction data from HDFC Bank credit card statements to CSV format.
 
-> **Note:** This tool currently supports only **HDFC Infinia credit card statements from September 2025 onwards**. Earlier statement formats are not supported.
+> **Note:** This tool currently supports only below cards
+> - **HDFC Infinia credit card statements from September 2025 onwards**. Earlier statement formats are not supported.
+> - **HDFC Regalia Gold credit card** (CSV export tested on 2026 Feb onwards)
+> - **HDFC Rupay UPI credit card** (CSV export tested on 2026 Mar onwards)
 
 ## Features
 
